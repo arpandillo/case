@@ -1,0 +1,63 @@
+from airflow import DAG
+from airflow.providers.google.cloud.operators.gcs_upload import GCSPushOperator
+from airflow.providers.bash.operators.bash import BashOperator
+from datetime import datetime, timedelta
+
+# Replace with your desired destination IP
+DESTINATION_IP = "8.8.8.8"
+
+# Replace with your GCS bucket and desired filename
+GCS_BUCKET_NAME = "your-bucket-name"
+OUTPUT_FILENAME = "traceroute_{{ ds_nodash }}.txt"
+
+default_args = {
+    "owner": "airflow",
+    "depends_on_past": False,
+    "start_date": datetime(2024, 4, 13), # Adjust as needed
+    "email_on_failure": False,
+    "retries": 1,
+    "retry_delay": timedelta(minutes=5),
+}
+
+with DAG(
+    dag_id="traceroute_to_gcs",
+    default_args=default_args,
+    schedule_interval=None, # Manual trigger
+) as dag:
+
+    # Get Airflow worker's IP address
+    get_ip_address = BashOperator(
+        task_id="get_ip_address",
+        bash_command="hostname -I | awk '{print $1}'",
+        do_xcom_push=True,
+    )
+
+    # Run traceroute command
+    traceroute_task = BashOperator(
+        task_id="traceroute",
+        bash_command=f"traceroute {DESTINATION_IP}",
+        do_xcom_push=True,
+    )
+
+    # Prepare the output with Airflow worker IP
+    def prepare_output(**kwargs):
+        worker_ip = kwargs["ti"].xcom_pull(task_ids="get_ip_address")
+        traceroute_output = kwargs["ti"].xcom_pull(task_ids="traceroute")
+        output = f"Airflow Worker IP: {worker_ip}\n\n{traceroute_output}"
+        return output
+
+    # Upload the prepared output to GCS
+    upload_to_gcs = GCSPushOperator(
+        task_id="upload_to_gcs",
+        local_path="/tmp/traceroute.txt",
+        dest="",  # Use template jinja for filename
+        mime_type="text/plain",
+        move_object=False,
+        template_fields=["dest"],
+        gcp_conn_id="google_cloud_default",
+        filename=OUTPUT_FILENAME,
+        # Call the prepare_output function to dynamically generate content
+        custom_mime_type_callable=prepare_output,
+    )
+
+    get_ip_address >> traceroute_task >> upload_to_gcs
